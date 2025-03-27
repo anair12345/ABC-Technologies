@@ -1,0 +1,194 @@
+- hosts: localhost
+  vars:
+    ansible_python_interpreter: '/mnt/c/Users/anair/OneDrive/Desktop/Edureka/DevOps Degree/Industry Grade Project I - Java Project/ABC Technologies/myenv/bin/python'
+  tasks:
+    # --- Deploy your Application ---
+    - name: Deploy abc-technologies to Kubernetes
+      k8s:
+        state: present
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: abc-technologies
+            namespace: default
+          spec:
+            replicas: 3
+            selector:
+              matchLabels:
+                app: abc-technologies
+            template:
+              metadata:
+                labels:
+                  app: abc-technologies
+              spec:
+                containers:
+                - name: abc-technologies
+                  image: abc-technologies
+                  imagePullPolicy: Never
+                  ports:
+                  - containerPort: 8080
+
+    # --- Create a Monitoring Namespace ---
+    - name: Create monitoring namespace
+      k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: monitoring
+
+    # --- Create RBAC for Prometheus ---
+    - name: Create Prometheus ServiceAccount
+      k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: prometheus
+            namespace: monitoring
+
+    - name: Create Prometheus ClusterRole
+      k8s:
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRole
+          metadata:
+            name: prometheus
+          rules:
+            - apiGroups: [""]
+              resources:
+                - pods
+                - nodes
+                - services
+                - endpoints
+              verbs: ["get", "list", "watch"]
+            - apiGroups: [""]
+              resources:
+                - nodes/metrics
+              verbs: ["get"]
+
+    - name: Create Prometheus ClusterRoleBinding
+      k8s:
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: prometheus
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: prometheus
+          subjects:
+            - kind: ServiceAccount
+              name: prometheus
+              namespace: monitoring
+
+    # --- Prometheus Setup ---
+    - name: Create Prometheus ConfigMap with Node Exporter scrape config
+      k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: prometheus-config
+            namespace: monitoring
+          data:
+            prometheus.yml: |
+              global:
+                scrape_interval: 15s
+              scrape_configs:
+                - job_name: 'prometheus'
+                  static_configs:
+                    - targets: ['localhost:9090']
+                - job_name: 'node_exporter'
+                  kubernetes_sd_configs:
+                    - role: pod
+                      namespaces:
+                        names:
+                          - monitoring
+                  relabel_configs:
+                    - source_labels: [__meta_kubernetes_pod_label_app]
+                      regex: node-exporter
+                      action: keep
+                    - source_labels: [__meta_kubernetes_pod_ip]
+                      target_label: __address__
+                      replacement: '$1:9100'
+
+    - name: Deploy Prometheus
+      k8s:
+        state: present
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: prometheus
+            namespace: monitoring
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: prometheus
+            template:
+              metadata:
+                labels:
+                  app: prometheus
+              spec:
+                serviceAccountName: prometheus
+                containers:
+                - name: prometheus
+                  image: prom/prometheus:v2.41.0
+                  args:
+                    - "--config.file=/etc/prometheus/prometheus.yml"
+                  ports:
+                    - containerPort: 9090
+                  volumeMounts:
+                    - name: config-volume
+                      mountPath: /etc/prometheus
+                volumes:
+                  - name: config-volume
+                    configMap:
+                      name: prometheus-config
+
+    - name: Expose Prometheus Service
+      k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: prometheus
+            namespace: monitoring
+          spec:
+            selector:
+              app: prometheus
+            ports:
+              - protocol: TCP
+                port: 9090
+                targetPort: 9090
+            type: ClusterIP
+
+    # --- Grafana Setup ---
+    - name: Create Grafana provisioning ConfigMap for Prometheus datasource
+      k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: grafana-provisioning-datasource
+            namespace: monitoring
+          data:
+            datasources.yaml: |
+              apiVersion: 1
+              datasources:
+              - name: Prometheus
+                type: prometheus
+                access: proxy
+                url: http://prometheus.monitoring.svc.cluster.local:9090
+                isDefault: true
