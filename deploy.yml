@@ -2,7 +2,7 @@
   vars:
     ansible_python_interpreter: '/mnt/c/Users/anair/OneDrive/Desktop/Edureka/DevOps Degree/Industry Grade Project I - Java Project/ABC Technologies/myenv/bin/python'
   tasks:
-    # --- Deploy your Application ---
+    # --- Deploy your Application (default namespace) ---
     - name: Deploy abc-technologies to Kubernetes
       k8s:
         state: present
@@ -27,7 +27,15 @@
                   image: abc-technologies
                   imagePullPolicy: Never
                   ports:
-                  - containerPort: 8080
+                    - containerPort: 8080
+                  env:
+                    # These environment variables assume your app is a Spring Boot application.
+                    - name: MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE
+                      value: "prometheus"
+                    - name: MANAGEMENT_ENDPOINTS_WEB_BASE_PATH
+                      value: "/actuator"
+                    - name: MANAGEMENT_SERVER_PORT
+                      value: "8080"
 
     # --- Create a Monitoring Namespace ---
     - name: Create monitoring namespace
@@ -89,7 +97,7 @@
               namespace: monitoring
 
     # --- Prometheus Setup ---
-    - name: Create Prometheus ConfigMap with Node Exporter scrape config
+    - name: Create Prometheus ConfigMap with scrape configs
       k8s:
         state: present
         definition:
@@ -119,6 +127,20 @@
                     - source_labels: [__meta_kubernetes_pod_ip]
                       target_label: __address__
                       replacement: '$1:9100'
+                - job_name: 'abc-technologies'
+                  metrics_path: /actuator/prometheus
+                  kubernetes_sd_configs:
+                    - role: pod
+                      namespaces:
+                        names:
+                          - default
+                  relabel_configs:
+                    - source_labels: [__meta_kubernetes_pod_label_app]
+                      regex: abc-technologies
+                      action: keep
+                    - source_labels: [__meta_kubernetes_pod_ip]
+                      target_label: __address__
+                      replacement: '$1:8080'
 
     - name: Deploy Prometheus
       k8s:
@@ -192,3 +214,84 @@
                 access: proxy
                 url: http://prometheus.monitoring.svc.cluster.local:9090
                 isDefault: true
+
+    - name: Deploy Grafana
+      k8s:
+        state: present
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: grafana
+            namespace: monitoring
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: grafana
+            template:
+              metadata:
+                labels:
+                  app: grafana
+              spec:
+                containers:
+                - name: grafana
+                  image: grafana/grafana:latest
+                  ports:
+                    - containerPort: 3000
+                  env:
+                    - name: GF_SECURITY_ADMIN_USER
+                      value: "admin"
+                    - name: GF_SECURITY_ADMIN_PASSWORD
+                      value: "admin"
+                  volumeMounts:
+                    - name: grafana-provisioning
+                      mountPath: /etc/grafana/provisioning
+                volumes:
+                  - name: grafana-provisioning
+                    configMap:
+                      name: grafana-provisioning-datasource
+
+    - name: Expose Grafana Service
+      k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: grafana
+            namespace: monitoring
+          spec:
+            selector:
+              app: grafana
+            ports:
+              - protocol: TCP
+                port: 3000
+                targetPort: 3000
+            type: ClusterIP
+
+    # --- Node Exporter Setup (using a DaemonSet) ---
+    - name: Deploy Node Exporter DaemonSet
+      k8s:
+        state: present
+        definition:
+          apiVersion: apps/v1
+          kind: DaemonSet
+          metadata:
+            name: node-exporter
+            namespace: monitoring
+          spec:
+            selector:
+              matchLabels:
+                app: node-exporter
+            template:
+              metadata:
+                labels:
+                  app: node-exporter
+              spec:
+                hostNetwork: true
+                containers:
+                - name: node-exporter
+                  image: prom/node-exporter:v1.5.0
+                  ports:
+                    - containerPort: 9100
